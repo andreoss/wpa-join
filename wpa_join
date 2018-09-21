@@ -1,0 +1,76 @@
+#!/bin/sh
+set -u
+set -o pipefail
+
+[ "${WPA_JOIN_DEBUG:-}" ] && set -x
+
+__check_command() {
+	command -v "$1" >/dev/null
+}
+
+__assert_command() {
+	cmd="$1"
+	shift
+	if ! __check_command "$cmd"; then
+		echo >/dev/stderr "Command '$cmd' not found in \$PATH: $*"
+		exit 1
+	fi
+}
+
+__assert_command wpa_cli \
+	"'wpa_supplicant' is not installed"
+__assert_command pass \
+	"'pass' is not installed"
+
+__check_password() {
+	if [ "${#PASSWORD}" -lt 8 ]; then
+		>/dev/stderr echo "Password '$PASSWORD' is too short. Invalid for wpa_cli."
+	fi
+}
+
+__start_with_number() {
+	grep '^[0-9]'
+}
+
+__wpa_network_id() {
+	NETWORK_ID=$(wpa_cli list_networks | __start_with_number |
+		while read -r ID SSID; do
+			if [ "$SSID" = "$NETWORK" ]; then
+				echo "$ID"
+			fi
+		done | __start_with_number | head -1)
+	if [ ! "$NETWORK_ID" ]; then
+		NETWORK_ID=$(wpa_cli add_network | __start_with_number | tail -1)
+	fi
+	echo "$NETWORK_ID"
+}
+
+__wpa_add_network() {
+	NETWORK_ID=$(__wpa_network_id)
+	wpa_cli set_network "$NETWORK_ID" ssid '"'"$NETWORK"'"'
+	wpa_cli set_network "$NETWORK_ID" psk '"'"$PASSWORD"'"'
+}
+
+__wpa_add_known_network() {
+	PASSWORD="$(pass show "wpa/""$NETWORK" | head -1)"
+	__check_password
+	__wpa_add_network
+}
+
+PASSWORD_STORE_DIR="${PASSWORD_STORE_DIR:-$HOME/.local/share/password-store}"
+NETWORK="${1:-}"
+
+if [ "$NETWORK" ]; then
+	PASSWORD=
+	PASSWORD_FILE="$PASSWORD_STORE_DIR/wpa/${NETWORK}.gpg"
+	if [ ! -e "$PASSWORD_FILE" ]; then
+		pass insert "wpa/""$NETWORK"
+	fi
+	__wpa_add_known_network
+else
+	find "$PASSWORD_STORE_DIR/wpa/" -name '*.gpg' -exec basename {} ';' |
+		while read -r FILE; do
+			NETWORK=$(echo "$FILE" | sed 's/.gpg$//')
+			__wpa_add_known_network
+		done
+fi
